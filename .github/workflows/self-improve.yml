@@ -1,0 +1,150 @@
+name: Self Improve
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"   # every 2 hours
+  workflow_dispatch:          # manual trigger for testing
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  # ── Job 1: LLM improves the code and commits ────────────────────────────────
+  improve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install anthropic
+
+      - name: Run LLM improvement
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/improve.py
+
+      - name: Commit improvements
+        run: |
+          if git diff --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add algorithms/
+          git commit -m "🤖 LLM self-improvement $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push
+
+  # ── Job 2: Spin up Hetzner VPS and register a uniquely-labelled runner ──────
+  deploy-runner:
+    needs: improve
+    runs-on: ubuntu-latest
+    outputs:
+      server_id:    ${{ steps.deploy.outputs.server_id }}
+      runner_name:  ${{ steps.deploy.outputs.runner_name }}
+      runner_label: ${{ steps.deploy.outputs.runner_label }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Get GitHub runner registration token
+        id: runner-token
+        run: |
+          RESPONSE=$(curl -fsSL -X POST \
+            -H "Authorization: token ${{ secrets.GH_PAT }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token")
+          TOKEN=$(echo "$RESPONSE" | jq -r '.token')
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "ERROR: Failed to get runner registration token"
+            echo "Response: $RESPONSE"
+            exit 1
+          fi
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy Hetzner VPS
+        id: deploy
+        env:
+          HETZNER_TOKEN:     ${{ secrets.HETZNER_TOKEN }}
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          RUNNER_TOKEN:      ${{ steps.runner-token.outputs.token }}
+          REPO:              ${{ github.repository }}
+        run: python scripts/deploy_runner.py
+
+      - name: Wait for specific runner to come online (max 10 min)
+        run: |
+          RUNNER_NAME="${{ steps.deploy.outputs.runner_name }}"
+          echo "Polling for runner: $RUNNER_NAME"
+          for i in $(seq 1 20); do
+            STATUS=$(curl -fsSL \
+              -H "Authorization: token ${{ secrets.GH_PAT }}" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runners" \
+              | jq -r --arg name "$RUNNER_NAME" \
+                '.runners[] | select(.name == $name) | .status')
+            echo "Attempt $i/20: runner '$RUNNER_NAME' status=${STATUS:-not-registered}"
+            if [ "$STATUS" = "online" ]; then
+              echo "Runner is online and ready!"
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "ERROR: runner '$RUNNER_NAME' never came online within 10 minutes"
+          exit 1
+
+  # ── Job 3: Run tests on the exact runner we created ─────────────────────────
+  test:
+    needs: deploy-runner
+    runs-on:
+      - self-hosted
+      - ${{ needs.deploy-runner.outputs.runner_label }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install pytest
+
+      - name: Run tests
+        run: pytest tests/ -v
+
+  # ── Job 4: Delete Hetzner VPS (always, even if tests fail) ──────────────────
+  cleanup:
+    needs: [deploy-runner, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete Hetzner server
+        env:
+          HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
+          SERVER_ID:     ${{ needs.deploy-runner.outputs.server_id }}
+        run: |
+          if [ -z "$SERVER_ID" ] || [ "$SERVER_ID" = "null" ]; then
+            echo "No server_id available, skipping cleanup."
+            exit 0
+          fi
+          HTTP_CODE=$(curl -fsSL -o /dev/null -w "%{http_code}" -X DELETE \
+            -H "Authorization: Bearer $HETZNER_TOKEN" \
+            "https://api.hetzner.cloud/v1/servers/$SERVER_ID")
+          if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "204" ] || [ "$HTTP_CODE" = "404" ]; then
+            echo "Server $SERVER_ID deleted (HTTP $HTTP_CODE)."
+          else
+            echo "WARNING: Unexpected HTTP $HTTP_CODE when deleting server $SERVER_ID"
+          fi

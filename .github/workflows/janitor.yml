@@ -1,0 +1,43 @@
+name: Janitor — cleanup orphaned Hetzner runners
+
+on:
+  schedule:
+    - cron: "30 * * * *"   # every hour at :30
+  workflow_dispatch:
+
+jobs:
+  cleanup-orphans:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete Hetzner servers older than 90 minutes
+        env:
+          HETZNER_TOKEN: ${{ secrets.HETZNER_TOKEN }}
+        run: |
+          CUTOFF=$(date -u -d '90 minutes ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+            || date -u -v-90M '+%Y-%m-%dT%H:%M:%SZ')
+
+          echo "Deleting gh-runner-* servers created before $CUTOFF ..."
+
+          SERVERS=$(curl -fsSL \
+            -H "Authorization: Bearer $HETZNER_TOKEN" \
+            "https://api.hetzner.cloud/v1/servers?label_selector=purpose=github-runner" \
+            | jq -c '.servers[] | {id, name, created}')
+
+          if [ -z "$SERVERS" ]; then
+            echo "No orphaned servers found."
+            exit 0
+          fi
+
+          echo "$SERVERS" | while IFS= read -r server; do
+            ID=$(echo "$server" | jq -r '.id')
+            NAME=$(echo "$server" | jq -r '.name')
+            CREATED=$(echo "$server" | jq -r '.created')
+            if [[ "$CREATED" < "$CUTOFF" ]]; then
+              echo "Deleting orphan: $NAME (id=$ID, created=$CREATED)"
+              curl -fsSL -X DELETE \
+                -H "Authorization: Bearer $HETZNER_TOKEN" \
+                "https://api.hetzner.cloud/v1/servers/$ID"
+            else
+              echo "Keeping: $NAME (created=$CREATED, not old enough)"
+            fi
+          done
