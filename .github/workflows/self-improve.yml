@@ -16,11 +16,11 @@ jobs:
   improve:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: pip install anthropic
@@ -51,11 +51,11 @@ jobs:
       runner_name:  ${{ steps.deploy.outputs.runner_name }}
       runner_label: ${{ steps.deploy.outputs.runner_label }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: pip install requests
@@ -84,11 +84,11 @@ jobs:
           REPO:              ${{ github.repository }}
         run: python scripts/deploy_runner.py
 
-      - name: Wait for specific runner to come online (max 10 min)
+      - name: Wait for specific runner to come online (max 15 min)
         run: |
           RUNNER_NAME="${{ steps.deploy.outputs.runner_name }}"
           echo "Polling for runner: $RUNNER_NAME"
-          for i in $(seq 1 20); do
+          for i in $(seq 1 30); do
             STATUS=$(curl -fsSL \
               -H "Authorization: token ${{ secrets.GH_PAT }}" \
               -H "Accept: application/vnd.github.v3+json" \
@@ -102,7 +102,7 @@ jobs:
             fi
             sleep 30
           done
-          echo "ERROR: runner '$RUNNER_NAME' never came online within 10 minutes"
+          echo "ERROR: runner '$RUNNER_NAME' never came online within 15 minutes"
           exit 1
 
   # ── Job 3: Run tests on the exact runner we created ─────────────────────────
@@ -113,11 +113,11 @@ jobs:
       - ${{ needs.deploy-runner.outputs.runner_label }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Install test dependencies
         run: pip install pytest
